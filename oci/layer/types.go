@@ -52,3 +52,15 @@ type RepackOptions struct {
 	// whiteouts are untouched.
 	TranslateOverlayWhiteouts bool
 }
+
+// CacheOptions describes the behaviour of the various Cache operations
+type CacheOptions struct {
+	// MapOptions are the UID and GID mappings used when caching an image
+	MapOptions MapOptions
+
+	// Cache Path is the path to the image cache repository
+	CachePath string
+
+	// Force is the flag that will allow the overwriting of existing metadata
+	Force bool
+}

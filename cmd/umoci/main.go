@@ -106,6 +106,7 @@ func Main(args []string) error {
 	app.Commands = []cli.Command{
 		configCommand,
 		unpackCommand,
+		cacheCommand,
 		repackCommand,
 		gcCommand,
 		initCommand,
