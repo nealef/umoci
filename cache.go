@@ -30,10 +30,10 @@ import (
 )
 
 // Cache extracts configuration, manifest datai, and the layers from an image to the specified bundle path.
-func Cache(engineExt casext.Engine, fromName string, bundlePath string, cacheOptions layer.CacheOptions) error {
+func Cache(engineExt casext.Engine, fromName string, bundlePath string, opts layer.CacheOptions) error {
 	var meta Meta
 	meta.Version = MetaVersion
-	meta.MapOptions = cacheOptions.MapOptions
+	meta.MapOptions = opts.MapOptions
 
 	fromDescriptorPaths, err := engineExt.ResolveReference(context.Background(), fromName)
 	if err != nil {
@@ -61,7 +61,7 @@ func Cache(engineExt casext.Engine, fromName string, bundlePath string, cacheOpt
 	log.WithFields(log.Fields{
 		"bundle": bundlePath,
 		"ref":    fromName,
-		"cache":  cacheOptions.CachePath,
+		"cache":  opts.CachePath,
 	}).Debugf("umoci: caching OCI image")
 
 	// Get the manifest.
@@ -78,7 +78,7 @@ func Cache(engineExt casext.Engine, fromName string, bundlePath string, cacheOpt
 	// XXX: We should probably defer os.RemoveAll(bundlePath).
 
 	log.Info("caching bundle ...")
-	if err := layer.CacheManifest(context.Background(), engineExt, bundlePath, manifest, &cacheOptions); err != nil {
+	if err := layer.CacheManifest(context.Background(), engineExt, bundlePath, manifest, &opts); err != nil {
 		return errors.Wrap(err, "create runtime bundle")
 	}
 	log.Info("... done")

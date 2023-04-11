@@ -44,8 +44,8 @@ import (
 	"github.com/pkg/errors"
 )
 
-// CacheLayer places a layer identified by its chainID into the cache
-func CacheLayer(layer io.Reader, chainID digest.Digest, opt *CacheOptions) (bool, error) {
+// cacheLayer places a layer identified by its chainID into the cache
+func cacheLayer(layer io.Reader, chainID digest.Digest, opt *CacheOptions) (bool, error) {
 	// Place layer in layersPath/algo/hash if it's not already there
 	algo := chainID.Algorithm()
 	hash := chainID.Hex()
@@ -54,10 +54,14 @@ func CacheLayer(layer io.Reader, chainID digest.Digest, opt *CacheOptions) (bool
 
 	_, err := os.Lstat(cacheLayerPath)
 	if err == nil {
-		return true, nil
+		if opt.Force {
+			_ = os.Remove(cacheLayerPath)
+		} else {
+			return true, nil
+		}
 	} else if os.IsNotExist(err) {
 		if err := os.MkdirAll(cachePath, 0755); err != nil && !os.IsExist(err) {
-			return false, errors.Wrap(err, "mkdir layers")
+			return false, errors.Wrap(err, "mkdir layer cache")
 		}
 		log.Infof("created cache layers: %s", cachePath)
 	} else if err != nil {
@@ -86,6 +90,43 @@ func CacheLayer(layer io.Reader, chainID digest.Digest, opt *CacheOptions) (bool
 		}
 	}
 	return false, nil
+}
+
+// cacheContent caches the packed layer for use by the containerd Content Store
+func cacheContent(content io.Reader, layerDigest digest.Digest, opt *CacheOptions) (error) {
+	// Place layer in layersPath/algo/hash if it's not already there
+	algo := layerDigest.Algorithm()
+	hash := layerDigest.Hex()
+	contentPath := filepath.Join(opt.CachePath, "content", algo.String())
+	contentLayerPath := filepath.Join(contentPath, hash)
+
+	_, err := os.Lstat(contentLayerPath)
+	if err == nil {
+		if opt.Force {
+			_ = os.Remove(contentLayerPath)
+		} else {
+			return nil
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.MkdirAll(contentPath, 0755); err != nil && !os.IsExist(err) {
+			return errors.Wrap(err, "mkdir content cache")
+		}
+		log.Infof("created content layers: %s", contentPath)
+	} else if err != nil {
+		return errors.Wrapf(err, "detecting layers")
+	}
+
+	dst, err := os.OpenFile(contentLayerPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err == nil {
+		_, err = system.Copy(dst, content)
+		dst.Close()
+		if err != nil {
+			return errors.Wrapf(err, "copying content to cache")
+		}
+	} else {
+		return errors.Wrapf(err, "opening content layer in  cache")
+	}
+	return nil
 }
 
 // CacheManifest extracts all of the layers in the given manifest, as well as
@@ -153,7 +194,7 @@ func CacheManifest(ctx context.Context, engine cas.Engine, bundle string, manife
 	}
 
 	log.Infof("cache layers: %s", opt.CachePath)
-	if err := CacheLayers(ctx, engine, manifest, opt); err != nil {
+	if err := cacheLayers(ctx, engine, manifest, opt); err != nil {
 		return errors.Wrap(err, "cache layers")
 	}
 
@@ -170,15 +211,15 @@ func CacheManifest(ctx context.Context, engine cas.Engine, bundle string, manife
 	}
 	defer runCfgFile.Close()
 
-	if err := CacheRuntimeJSON(ctx, engine, runCfgFile, imgCfgFile, manifest, opt); err != nil {
+	if err := cacheRuntimeJSON(ctx, engine, runCfgFile, imgCfgFile, manifest, opt); err != nil {
 		return errors.Wrap(err, "cache config.json")
 	}
 	return nil
 }
 
-// CacheLayers extracts all of the layers in the given manifest.
+// cacheLayers extracts all of the layers in the given manifest.
 // Some verification is done during image extraction.
-func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest, opt *CacheOptions) (err error) {
+func cacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest, opt *CacheOptions) (err error) {
 	engineExt := casext.NewEngine(engine)
 
 	// Make sure that the owner is correct.
@@ -243,7 +284,7 @@ func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest
 		if err != nil {
 			return errors.Wrap(err, "get layer blob")
 		}
-		defer layerBlob.Close()
+		
 		if !isLayerType(layerBlob.Descriptor.MediaType) {
 			return errors.Errorf("cache layers: layer %s: blob is not correct mediatype: %s", layerBlob.Descriptor.Digest, layerBlob.Descriptor.MediaType)
 		}
@@ -267,7 +308,7 @@ func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest
 		layerDigester := digest.SHA256.Digester()
 		layer := io.TeeReader(layerRaw, layerDigester.Hash())
 
-		alreadyCached, err := CacheLayer(layer, chainID, opt)
+		alreadyCached, err := cacheLayer(layer, chainID, opt)
 		if err != nil {
 			return errors.Wrap(err, "cache layer")
 		}
@@ -299,8 +340,18 @@ func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest
 					  "-- this may indicate a bug in the tool which built this image",
 					  layerDescriptor.Digest, n)
 			}
-			if err := layerData.Close(); err != nil {
+
+			if err = layerData.Close(); err != nil {
 				return errors.Wrap(err, "close layer data")
+			}
+
+			// Reopen the blob so we can copy its contents
+			layerBlob.Close()
+			contentBlob, _ := engineExt.FromDescriptor(ctx, layerDescriptor)
+			contentData, _ := contentBlob.Data.(io.ReadCloser)
+			defer contentBlob.Close()
+			if err := cacheContent(contentData, layerDescriptor.Digest, opt); err != nil {
+				return err
 			}
 
 			layerDigest := layerDigester.Digest()
@@ -314,7 +365,7 @@ func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest
 	return nil
 }
 
-// CacheRuntimeJSON converts a given manifest's configuration to a runtime
+// cacheRuntimeJSON converts a given manifest's configuration to a runtime
 // configuration and writes it to the given writer. If rootfs is specified, it
 // is sourced during the configuration generation (for conversion of
 // Config.User and other similar jobs -- which will error out if the user could
@@ -322,7 +373,7 @@ func CacheLayers(ctx context.Context, engine cas.Engine, manifest ispec.Manifest
 // conversions that require sourcing the rootfs will be set to their default
 // values.
 //
-func CacheRuntimeJSON(ctx context.Context, engine cas.Engine, runCfgFile io.Writer, imgCfgFile io.Writer, manifest ispec.Manifest, opt *CacheOptions) error {
+func cacheRuntimeJSON(ctx context.Context, engine cas.Engine, runCfgFile io.Writer, imgCfgFile io.Writer, manifest ispec.Manifest, opt *CacheOptions) error {
 	engineExt := casext.NewEngine(engine)
 
 	var mapOptions MapOptions
